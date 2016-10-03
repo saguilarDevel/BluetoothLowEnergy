@@ -1,5 +1,5 @@
 ##BluetoothLowEnergy
-####Four projects are presented in different folders. This projects are for bluegiga BLE121LR module.
+####Four projects are presented in different folders. These projects are for bluegiga BLE121LR module.
 ###Adv-based
 ####BLE project that transmit the maximun amount of data possible in an advertisement packet, using adv_non_conn_ind 
 ###conn-based
