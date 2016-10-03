@@ -1,0 +1,229 @@
+# ================================================================
+# BGScript demo: Health Thermometer collector demo (BLE master)
+# Modify by: Sergio Aguilar 
+# ----------------------------------------------------------------
+#
+# CHANGELOG:
+#   2013-06-20 - Fix "address_type" to support random (e.g. iOS)
+#   2013-05-09 - Initial release
+#	2015-10-15 - Modifications for Notifications
+#                Counter for notify events
+#                Procedure to show dim variable via UART 
+#                In UART is shown a counter of the amounts of notifications 
+#                received when connection_disconnect
+#   2015-11-11 - Timer added when attributes_write for long range throughput 
+#                test    
+#
+# ================================================================
+
+
+const STATE_STANDBY = 0
+const STATE_SCANNING = 1
+const STATE_CONNECTING = 2
+const STATE_FINDING_SERVICES = 3
+const STATE_FINDING_ATTRIBUTES = 4
+const STATE_LISTENING_MEASUREMENTS = 5
+
+dim state                       # current application state
+dim att_handlesearch_start      # "start" handle holder during search
+dim att_handlesearch_end        # "end" handle holder during search
+dim att_handle_measurement      # temperature measurement attribute handle
+dim att_handle_measurement_ccc  # temp. meas. client characteristic config handle
+dim counter						# how many packets are received in one connection
+dim throughput 					# aprox. throughput based on packet count
+dim tick						#number of ticks, time counter
+dim provisional
+
+dim i   # overall ad data position index
+dim j   # individual ad field position index
+dim ad_field_length
+dim ad_field_type
+
+dim htm_flags
+dim htm_exponent
+dim htm_mantissa
+dim htm_measurement
+dim string(8)
+#reference to the connectionHandler, used for disconnection 
+dim connectionHandler 
+
+
+# procedure to output ASCII-formatted integer (input range [0, 2147483647])
+dim x_int_work(9)
+dim x_int_out(11)
+procedure print_uint31(endpoint, num)
+    x_int_work(0:1) = "\x00"
+    x_int_work(1:4) = num
+    if x_int_work(1:4) = 0 then
+        x_int_out(10 - x_int_work(0:1):1) = "0"       # already zero, so just use it
+        x_int_work(0:1) = x_int_work(0:1) + 1         # string length increment
+    else
+        while x_int_work(1:4) > 0
+            x_int_work(5:4) = (x_int_work(1:4) / 10) * 10     # create "decimal mask" for diff calc
+            x_int_out(10 - x_int_work(0:1):1) = x_int_work(1:4) - x_int_work(5:4) + $30 # next digit
+            x_int_work(0:1) = x_int_work(0:1) + 1             # string length increment
+            x_int_work(1:4) = x_int_work(1:4) / 10            # shift next decimal place over
+        end while
+    end if
+    call system_endpoint_tx(endpoint, x_int_work(0:1), x_int_out(11 - x_int_work(0:1):x_int_work(0:1)))
+end
+
+
+event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
+    # initialize state
+    state = STATE_STANDBY
+    call system_endpoint_tx(system_endpoint_uart1, 30, "\r\nHTM Collector Demo started\r\n")
+
+    # configure scanning (125ms interval, 125ms window, passive)
+    call gap_set_scan_parameters($c8, $c8, 0)
+    
+    # start scanning at boot (generic discovery)
+    call gap_discover(gap_discover_generic)
+    
+    # change state (I know, kinda pointless to have the one up above)
+    state = STATE_SCANNING
+    call system_endpoint_tx(system_endpoint_uart1, 13, "Scanning...\r\n")
+	#set counter to zero
+	counter = 0
+end
+
+event gap_scan_response(rssi, packet_type, sender, address_type, bond, data_len, data_data)
+    # advertisement packet found during scan, so check for Health Thermometer service
+    i = 0
+    while i < data_len
+        ad_field_length = data_data(i:1)
+        ad_field_type = data_data(i + 1:1)
+        if ad_field_type = $02 || ad_field_type = $03 then
+            # partial ($02) or complete ($03) list of 16-bit UUIDs
+            # search for 0x1809
+            j = 0
+            while j < ad_field_length
+                if data_data(i + j + 2:1) = $09 && data_data(i + j + 3:1) = $18 then
+                    # found Health Thermometer service in ad packet, so connect
+					#android $27 - min $6     -$10
+                    # (7.5ms/7.5ms min/max interval, 100ms timeout, 0 latency)
+                    call gap_connect_direct(sender(0:6), address_type, $A, $A, $100, 0)
+                    
+                    # change state
+                    state = STATE_CONNECTING
+                    call system_endpoint_tx(system_endpoint_uart1, 15, "Connecting...\r\n")
+
+                    # set loop counters to 100 so we'll stop looking
+                    # (there is no "break" function in BGScript)
+                    i = 100
+                    j = 100
+                end if
+                j = j + 2
+            end while
+        end if
+        i = i + ad_field_length + 1
+    end while
+end
+
+event connection_status(connection, flags, address, address_type, conn_interval, timeout, latency, bonding)
+    if (flags & $05) = $05 then
+        # connection established
+		#reset counter
+		counter = 0
+        call system_endpoint_tx(system_endpoint_uart1, 12, "Connected!\r\n")
+		#Set connectionHandler equal to connection
+        connectionHandler = connection
+        # start searching through service groups (UUID = 0x2800) to find Health Thermometer service
+        call attclient_read_by_group_type(connection, $0001, $ffff, 2, "\x00\x28")
+
+        # change state
+        state = STATE_FINDING_SERVICES
+        call system_endpoint_tx(system_endpoint_uart1, 21, "Finding services...\r\n")
+    end if
+end
+
+event attclient_group_found(connection, start_handle, end_handle, uuid_len, uuid_data)
+    # found a service group, so check to see if it's the Health Thermometer service (0x1809)
+    if uuid_len = 2 && uuid_data(0:1) = $09 && uuid_data(1:1) = $18 then
+        # found it! save the handle range
+        att_handlesearch_start = start_handle
+        att_handlesearch_end = end_handle
+        call system_endpoint_tx(system_endpoint_uart1, 16, "Found service!\r\n")
+    end if
+end
+
+event attclient_find_information_found(connection, chrhandle, uuid_len, uuid_data)
+    # found a descriptor, so check to see if it's the the measurement one (0x2A1C) or following CCC (0x2902)
+    if uuid_len = 2 && uuid_data(0:1) = $1C && uuid_data(1:1) = $2A then
+        # found the measurement attribute, so save the handle
+        att_handle_measurement = chrhandle
+        call system_endpoint_tx(system_endpoint_uart1, 27, "Found measurement handle!\r\n")
+    end if
+    if uuid_len = 2 && uuid_data(0:1) = $02 && uuid_data(1:1) = $29 && att_handle_measurement > 0 && att_handle_measurement_ccc = 0 then
+        # found client characteristic configuration for measurement attr, so save the handle
+        att_handle_measurement_ccc = chrhandle
+        call system_endpoint_tx(system_endpoint_uart1, 31, "Found measurement CCC handle!\r\n")
+    end if
+end
+
+event attclient_procedure_completed(connection, result, chrhandle)
+    # finished some attclient operation, so figure out what happened
+    if state = STATE_FINDING_SERVICES then
+        if att_handlesearch_end > 0 then
+            # change state
+            state = STATE_FINDING_ATTRIBUTES
+            call system_endpoint_tx(system_endpoint_uart1, 23, "Finding attributes...\r\n")
+
+            # found Health Thermometer service, so now find the measurement + CCC handles
+            call attclient_find_information(0, att_handlesearch_start, att_handlesearch_end)
+        else
+            # couldn't locate service with UUID 0x1809, uh oh
+            call system_endpoint_tx(system_endpoint_uart1, 24, "Couldn't find service!\r\n")
+        end if
+    end if
+    if state = STATE_FINDING_ATTRIBUTES && chrhandle > att_handlesearch_start then
+        if att_handle_measurement_ccc > 0 then
+            # change state
+            state = STATE_LISTENING_MEASUREMENTS
+            call system_endpoint_tx(system_endpoint_uart1, 26, "Awaiting measurements...\r\n")
+			# found everything, yay! now enable indications (write 0x02 to CCC handle)
+			#enable notify (write 0x0100 to CCC handle)
+            call attclient_attribute_write(0, att_handle_measurement_ccc, 2, $0001)
+			#enable timer, one shot
+			call hardware_set_soft_timer(98777, 0, 1)
+        else
+            # couldn't locate temperature measurement characteristic with UUID 0x2A1C, uh oh
+            # (or possibly the corresponding client characteristic configuration attribute)
+            call system_endpoint_tx(system_endpoint_uart1, 31, "Couldn't find characteristic!\r\n")
+        end if
+    end if
+end
+
+event attclient_attribute_value(connection, atthandle, type, value_len, value_data)
+ 	# received a pushed value from the slave, update counter
+	counter = counter + 1
+end
+
+event connection_disconnected(handle, result)
+    # connection disconnected
+	# Deactivate timer
+    call hardware_set_soft_timer(0, 0, 0)
+	
+	call system_endpoint_tx(system_endpoint_uart1, 15, "Disconnected!\r\n")
+    call system_endpoint_tx(system_endpoint_uart1, 25,  "Calculating Counter:   ")
+	# print number to UART1
+	call print_uint31(system_endpoint_uart1, counter) 
+	# start scanning again
+    call gap_discover(gap_discover_generic)
+	# change state
+    state = STATE_SCANNING
+	#reset connnection Handler
+	connectionHandler = 0
+    call system_endpoint_tx(system_endpoint_uart1, 13, "\r\nScanning...\r\n ")
+end
+
+event system_protocol_error(reason)
+    call system_endpoint_tx(system_endpoint_uart1, 7, "Error\r\n")
+
+end
+# catch timer tick, one shot, disconnect after 98777/32678 seg
+event hardware_soft_timer(handle)
+    # Send disconnect event
+    call connection_disconnect(connectionHandler)
+end
+
