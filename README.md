@@ -3,7 +3,7 @@
 ###Adv-based
 ####BLE project that transmit the maximun amount of data possible in an advertisement packet, using adv_non_conn_ind 
 ###conn-based
-####Heart rate monitor simulator, sends notifications at the highest rate possible, using the timer.
+####Heart rate monitor simulator, sends notifications at the highest rate possible, using the timer. In each tick a notification is send.
 ###master_collector_modify
 ####BLE Master that connects to a heart rate monitor BLE device, discover the services and enable notifications. Via UART it counts the amount of notifications received.
 ###master_collector_modify_timer
