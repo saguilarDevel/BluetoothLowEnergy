@@ -1,0 +1,49 @@
+# ================================================================
+# BGScript demo: Timer to generate data, maximum possible speed
+# Sergio Aguilar <saguilarDevel@gmail.com>
+# ----------------------------------------------------------------
+#
+# CHANGELOG:
+#   2013-02-14 - Timer to generate data and Maxime throughput 
+#
+# ================================================================
+
+const STATE_CONNECTION = 0
+const STATE_UPDATED = 1
+
+dim all_adc_buf(20) # buffer for 2-byte 8-channel ADC read data
+dim conn_state 		# used to update the connInterval
+dim counter			# counter for the amount of notify per timer cycle
+
+event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
+    # begin advertising at boot
+    call gap_set_mode(gap_general_discoverable, gap_directed_connectable)
+
+	conn_state = STATE_CONNECTION
+	counter = 0
+end
+
+event connection_disconnected(handle, result)
+    # connection disconnected, resume advertising
+    call gap_set_mode(gap_general_discoverable, gap_directed_connectable)
+	conn_state = STATE_CONNECTION
+	call hardware_set_soft_timer(0, 0, 0)
+	counter = 0
+end
+
+event connection_status(connection, flags, address, address_type, conn_interval, timeout, latency, bonding)
+ # In the first connection the timer is set to begin
+	if conn_state = STATE_CONNECTION then
+	# generate one packet each 1.50ms
+	call hardware_set_soft_timer(50, 0, 0)
+	end if
+	#the timer is only initialice once
+	conn_state = STATE_UPDATED
+end
+
+# catch timer tick, send notify
+event hardware_soft_timer(handle)
+	# write 20 bytes of data to GATT characteristic
+	call attributes_write(c_adc_data, 0, 20, all_adc_buf(0:20))
+end
+
